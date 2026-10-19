@@ -98,7 +98,8 @@ up to date at the end of every milestone.
   `switch.*` scenes) would put the products in standby. The power state is
   `unknown/binary`, read only: 1 `on`, 0 `standby`, `networkStandby`,
   `shutdown`, `storage`, or nothing accepts the connection. Standby on a
-  product that does not answer sends nothing and is not an error. Standby is
+  product that does not answer sends nothing and fails with "does not
+  answer: nothing sent" (review, minor 8). Standby is
   not a sensitive command (no physical risk): no option to enable it.
 - Categories and types from the core only (`server/utils/constants.js`):
   `music` for volume, play, pause, next, previous and playback state (as the
@@ -149,7 +150,7 @@ up to date at the end of every milestone.
   wait in the queue included), each request bounded by what is left; a
   command still queued at its deadline is dropped, never sent late. A
   request that may have reached the product (connected then silent) is
-  answered "sent, without confirmation" and the state read again 2 s later;
+  answered "sent, without confirmation" and the state read again once due (see the review fixes);
   a product that does not accept the connection gets "nothing sent". The
   states a command implies are published in the background (the ack never
   waits for Gladys).
@@ -169,3 +170,36 @@ up to date at the end of every milestone.
 - Text features show "—" when nothing plays.
 - mDNS: the REST API is asked on port 80 for a product found by mDNS (the
   port the mozart-api client uses), whatever port the announcement carries.
+
+### Review fixes (2026-10-19)
+
+- B1: a message counts its frames too: more than `MAX_FRAGMENTS` (1024),
+  empty continuations included, closes with 1009.
+- I1: one pong per batch of pings read (the last ping); a channel whose send
+  buffer (`writableLength`) passes 64 KB is dropped ("peer not reading").
+- I2: unmuting reads the level with the mute state; above the cap (read at
+  that moment) `setVolume(cap)` is sent first within the command budget, the
+  unmute only if it succeeded; a level unknown with a cap below 100: nothing
+  sent. Play and a source change lower the last known level (reading or
+  notification) to the cap first: it may be a few seconds old (said in the
+  docs).
+- Handshake: `Connection` must hold the `upgrade` token, a
+  `Sec-WebSocket-Protocol` is refused, the end is searched in the new bytes
+  only (linear); text decoded with `TextDecoder` fatal (1007 otherwise).
+- Close: empty or valid code answered 1000, a 1-byte payload or a reserved
+  code answered 1002 (never echoed); the close frame is flushed with
+  `socket.end()`, the socket destroyed one second later at most.
+- Command answers (PUT, POST): only the status counts, the body is ignored.
+- Queue per product: pause, mute and standby go before the volumes waiting;
+  a volume waiting is replaced by the newer one, both commands get the
+  result of the one sent.
+- Reads after a command (recheck) and device updates go through `isDue`
+  (backoff skipped, interval kept): a recheck not due is planned once for
+  when it is, then dropped if still not due. This replaces the "re-read 2 s
+  later" of the first version: the notifications carry the change at once.
+- The spacing of the reads (`attempts`) and the identity timestamp are
+  cleared whenever the address of a product changes.
+- `start()` never runs twice at once: the starts asked while one runs are
+  merged into one (last configuration, "connected" if any was).
+- The reading of a deleted device is kept (created again right after: not
+  read before the interval).

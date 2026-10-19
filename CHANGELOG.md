@@ -34,4 +34,27 @@ the notes of the version's GitHub Release.
   expected fields are kept.
 - "Find the products" and "Check the products" buttons.
 
+### Fixed
+
+- Unmuting a product whose volume is above the cap lowers the volume to the
+  cap first (or does not unmute, "nothing sent"); play and a source change
+  lower a known volume above the cap first.
+- Pause, mute and standby go before the volume changes still waiting, which
+  are merged into the last one.
+- The reads after a command or a device update are never faster than the
+  refresh interval; the spacing of the reads restarts when a product
+  changes address; two starts never run at once.
+- Standby on a product that does not answer says "does not answer: nothing
+  sent"; the body of a command answer is ignored.
+
+### Security
+
+- The notification channel refuses a message of more than 1024 frames
+  (empty fragments made the memory grow without limit), answers one pong
+  per batch of pings and drops a peer that does not read past 64 KB.
+- The handshake requires `Connection: Upgrade`, refuses a subprotocol not
+  asked for and is read in linear time; text messages must be valid UTF-8;
+  a 1-byte or reserved close code is answered 1002, never echoed, and the
+  close frame is flushed before the end.
+
 [Unreleased]: https://github.com/LM1LC3N7/gladys-bang-olufsen/commits/main

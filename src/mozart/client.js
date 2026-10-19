@@ -226,6 +226,11 @@ export class MozartClient {
       // The ErrorModel of the answer is not shown: only the status is kept.
       throw new ProductError(ERROR_KINDS.HTTP, `HTTP ${answer.status}`, { status: answer.status });
     }
+    // A command (PUT, POST) is accepted by its status alone: whatever body
+    // comes with it ("Created", HTML...) is never parsed.
+    if (method !== 'GET') {
+      return {};
+    }
     const text = answer.body.trim();
     if (text === '') {
       return {};

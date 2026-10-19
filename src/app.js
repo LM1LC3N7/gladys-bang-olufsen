@@ -49,6 +49,14 @@ const TRANSPORT = new Map([
   [FEATURES.PREVIOUS, 'prev'],
 ]);
 
+/** Volumes waiting are merged; pause, mute and standby go before them. */
+const QUEUE_KIND = new Map([
+  [FEATURES.VOLUME, 'volume'],
+  [FEATURES.PAUSE, 'priority'],
+  [FEATURES.MUTE, 'priority'],
+  [FEATURES.STANDBY, 'priority'],
+]);
+
 /** Answers that would come back the same if asked again soon: spaced out like no answer. */
 const isSpacedError = (err) => err?.kind === ERROR_KINDS.HTTP || err?.kind === ERROR_KINDS.PROTOCOL;
 
@@ -126,6 +134,8 @@ export class BangOlufsenApp {
     this.channels = new Map();
     /** serial -> pending publication of notified states */
     this.publishTimers = new Map();
+    /** serials with a read planned after a command (recheck) */
+    this.plannedReads = new Set();
     /** Typed addresses where something answers, but not the Mozart API. */
     this.notMozart = new Set();
     /** serials of the devices created in Gladys */
@@ -152,8 +162,30 @@ export class BangOlufsenApp {
    * every configuration save. On a (re)connection the core has forgotten the
    * states and the status: everything this app remembered as "already
    * published" is forgotten too. The spacing of the reads is kept.
+   *
+   * Never two at once: a start asked while another runs waits for it, and
+   * the starts asked meanwhile are merged into one (the last configuration,
+   * "connected" if any of them was).
    */
-  async start(raw = {}, { connected = false } = {}) {
+  start(raw = {}, { connected = false } = {}) {
+    const pending = this.pendingStart;
+    if (pending) {
+      pending.raw = raw;
+      pending.connected = pending.connected || connected;
+      return pending.promise;
+    }
+    const next = { raw, connected };
+    next.promise = (this.startChain ?? Promise.resolve()).then(() => {
+      // From here on, a new start is queued after this one.
+      this.pendingStart = undefined;
+      return this.runStart(next.raw, { connected: next.connected });
+    });
+    this.pendingStart = next;
+    this.startChain = next.promise.catch(() => {});
+    return next.promise;
+  }
+
+  async runStart(raw, { connected }) {
     this.config = normalizeConfig(raw);
     this.started = true;
     // The timer first: whatever fails below, the next round tries again.
@@ -198,6 +230,7 @@ export class BangOlufsenApp {
     }
     this.backgroundTimers.clear();
     this.publishTimers.clear();
+    this.plannedReads.clear();
     for (const serial of [...this.channels.keys()]) {
       this.closeChannel(serial);
     }
@@ -269,14 +302,54 @@ export class BangOlufsenApp {
     }
   }
 
-  enqueue(serial, task) {
-    const previous = this.queues.get(serial) ?? Promise.resolve();
-    const run = previous.then(task, task);
-    this.queues.set(
-      serial,
-      run.catch(() => {}),
-    );
-    return run;
+  /**
+   * The command queue of a product: one command at a time. `kind`:
+   * 'volume' (a volume still waiting is replaced by the newer one, and both
+   * commands get the result of the one sent), 'priority' (pause, mute,
+   * standby: placed before the volumes waiting) or 'other' (in order).
+   */
+  enqueue(serial, task, kind = 'other') {
+    let queue = this.queues.get(serial);
+    if (!queue) {
+      queue = { items: [], running: false };
+      this.queues.set(serial, queue);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      if (kind === 'volume') {
+        const waiting = queue.items.find((item) => item.kind === 'volume');
+        if (waiting) {
+          waiting.task = task;
+          waiting.waiters.push(waiter);
+          return;
+        }
+      }
+      const item = { kind, task, waiters: [waiter] };
+      const firstVolume = queue.items.findIndex((i) => i.kind === 'volume');
+      if (kind === 'priority' && firstVolume !== -1) {
+        queue.items.splice(firstVolume, 0, item);
+      } else {
+        queue.items.push(item);
+      }
+      this.drainQueue(queue);
+    });
+  }
+
+  async drainQueue(queue) {
+    if (queue.running) {
+      return;
+    }
+    queue.running = true;
+    while (queue.items.length > 0) {
+      const item = queue.items.shift();
+      try {
+        const value = await item.task();
+        item.waiters.forEach((w) => w.resolve(value));
+      } catch (err) {
+        item.waiters.forEach((w) => w.reject(err));
+      }
+    }
+    queue.running = false;
   }
 
   // --- Spacing of the reads ----------------------------------------------------
@@ -433,16 +506,19 @@ export class BangOlufsenApp {
       ) {
         this.logger.warn(`${deviceName(other)} no longer answers at ${addressKey(address)}`);
         other.host = '';
+        this.attempts.delete(other.serial);
+        this.identityReadAt.delete(other.serial);
         this.clients.delete(other.serial);
         this.closeChannel(other.serial);
         this.readings.set(other.serial, { on: false });
       }
     }
     const before = JSON.stringify(product);
-    if (!product.host && product.host !== address.host) {
-      // Found again after its address was lost: its spaced-out "no answer"
-      // was about no address at all, not about this one.
+    if (product.host !== address.host || product.port !== address.port) {
+      // A new address: the spaced-out "no answer" and the identity read were
+      // about the old one, not about this one.
       this.attempts.delete(product.serial);
+      this.identityReadAt.delete(product.serial);
     }
     Object.assign(product, { host: address.host, port: address.port });
     if (description.name !== undefined) {
@@ -774,8 +850,32 @@ export class BangOlufsenApp {
     await this.publishStates(product, { on: true, ...partial });
   }
 
-  recheck(product) {
-    this.later(() => this.readState(product), this.timings.recheckDelay);
+  /**
+   * A read after a command, through isDue like every read: never faster
+   * than the interval (the backoff is skipped). When the product is not due
+   * yet, one read is planned for when it is; at most one planned per
+   * product, and a planned read that is still not due is dropped (the
+   * polling and the notifications carry on).
+   */
+  recheck(product, { retry = true } = {}) {
+    if (this.plannedReads.has(product.serial)) {
+      return;
+    }
+    const record = this.attempts.get(product.serial);
+    const wait = record
+      ? Math.max(this.timings.recheckDelay, record.last + this.intervalMs() - SLACK - this.now())
+      : this.timings.recheckDelay;
+    this.plannedReads.add(product.serial);
+    this.later(() => {
+      this.plannedReads.delete(product.serial);
+      if (!this.created.has(product.serial)) {
+        return undefined;
+      }
+      if (this.isDue(product.serial, true)) {
+        return this.readState(product);
+      }
+      return retry ? this.recheck(product, { retry: false }) : undefined;
+    }, wait);
   }
 
   // --- Notification channel (WebSocket) -------------------------------------------
@@ -969,14 +1069,18 @@ export class BangOlufsenApp {
     // Set just before a command request leaves: from then on, the command may
     // have reached the product, whatever happens next.
     const context = { mayHaveSent: false };
-    const run = this.enqueue(product.serial, async () => {
-      if (late || this.remaining(started) < 50) {
-        // Gladys stopped waiting while this command was queued: dropped, never sent late.
-        late = true;
-        throw new ProductError(ERROR_KINDS.BUDGET, 'No time left for this command, nothing sent');
-      }
-      return this.command(product, key, checked, started, context);
-    });
+    const run = this.enqueue(
+      product.serial,
+      async () => {
+        if (late || this.remaining(started) < 50) {
+          // Gladys stopped waiting while this command was queued: dropped, never sent late.
+          late = true;
+          throw new ProductError(ERROR_KINDS.BUDGET, 'No time left for this command, nothing sent');
+        }
+        return this.command(product, key, checked, started, context);
+      },
+      QUEUE_KIND.get(key) ?? 'other',
+    );
     // Wall-clock deadline (not the injectable timers): the ack Gladys waits for.
     let timer;
     const deadline = new Promise((resolve, reject) => {
@@ -1076,6 +1180,38 @@ export class BangOlufsenApp {
   }
 
   /**
+   * Before a command that brings the sound back (unmute, play, source): a
+   * `level` above the cap (read from the configuration now) is lowered to the
+   * cap first, within the budget of the command. When it cannot be, the
+   * command itself is not sent.
+   */
+  async lowerToCap(product, level, client, context, what) {
+    const cap = this.config.maxVolume;
+    if (!Number.isInteger(level) || level <= cap) {
+      return;
+    }
+    this.logger.info(
+      `${deviceName(product)}: volume ${level} lowered to the cap ${cap} before ${what}`,
+    );
+    try {
+      await this.send(product, () => client().setVolume(cap), context);
+    } catch (err) {
+      if (err.kind === ERROR_KINDS.TIMEOUT) {
+        throw new ProductError(
+          ERROR_KINDS.TIMEOUT,
+          `Volume ${cap} sent, without confirmation from the product: ${what} not sent`,
+          { sent: true },
+        );
+      }
+      throw new ProductError(
+        err.kind,
+        `${deviceName(product)}: volume not lowered to the cap ${cap} (${err.message}): ${what} not sent`,
+      );
+    }
+    this.publishPartial(product, { volume: cap }).catch(() => {});
+  }
+
+  /**
    * Runs one command. The states it implies are published in the background
    * (never awaited here): a slow Gladys never turns a command the product
    * accepted into a failed ack.
@@ -1114,26 +1250,36 @@ export class BangOlufsenApp {
         throw new Error(`${deviceName(product)}: mute state unknown, nothing sent`);
       }
       const muted = !volume.muted;
+      if (!muted) {
+        // Unmuting brings the sound back at the level read just now: above
+        // the cap (read now too), the volume is lowered first, or nothing.
+        if (!Number.isInteger(volume.level) && this.config.maxVolume < 100) {
+          throw new Error(`${deviceName(product)}: volume unknown, not unmuted, nothing sent`);
+        }
+        await this.lowerToCap(product, volume.level, client, context, 'unmute');
+      }
       await this.send(product, () => client().setMute(muted), context);
       publish({ muted });
       return undefined;
     }
     if (TRANSPORT.has(key)) {
+      if (key === FEATURES.PLAY) {
+        // Play brings the sound back: above the cap (last known level), lowered first.
+        await this.lowerToCap(
+          product,
+          this.readings.get(product.serial)?.volume,
+          client,
+          context,
+          'play',
+        );
+      }
       await this.send(product, () => client().command(TRANSPORT.get(key)), context);
       this.recheck(product);
       return undefined;
     }
     if (key === FEATURES.STANDBY) {
-      try {
-        await this.send(product, () => client().standby(), context);
-      } catch (err) {
-        if (err.kind !== ERROR_KINDS.UNREACHABLE) {
-          throw err;
-        }
-        // Nothing answers: off the network. Nothing was sent, and nothing
-        // else is wanted from a standby button.
-        this.logger.info(`${deviceName(product)} does not answer: nothing to put in standby`);
-      }
+      // A product that does not answer gets "does not answer: nothing sent".
+      await this.send(product, () => client().standby(), context);
       this.recheck(product);
       return undefined;
     }
@@ -1147,6 +1293,13 @@ export class BangOlufsenApp {
           `${deviceName(product)}: source "${value}" not available now, nothing sent`,
         );
       }
+      await this.lowerToCap(
+        product,
+        this.readings.get(product.serial)?.volume,
+        client,
+        context,
+        'the source change',
+      );
       await this.send(product, () => client().setSource(source.id), context);
       publish({ source: source.id });
       this.recheck(product);
@@ -1163,8 +1316,16 @@ export class BangOlufsenApp {
       return;
     }
     this.created.add(product.serial);
-    this.readings.delete(product.serial);
-    await this.readState(product);
+    // Also called for every device update: read only when due (never faster
+    // than the interval), else the last reading is published again.
+    if (this.isDue(product.serial, true)) {
+      await this.readState(product);
+    } else {
+      const reading = this.readings.get(product.serial);
+      if (reading) {
+        await this.publishStates(product, reading);
+      }
+    }
     this.syncChannels();
     await this.updateStatus();
   }
@@ -1172,8 +1333,9 @@ export class BangOlufsenApp {
   async deviceDeleted(device) {
     const product = this.productOfDevice(device);
     if (product) {
+      // The reading is kept: a device created again right after is not read
+      // again before the interval.
       this.created.delete(product.serial);
-      this.readings.delete(product.serial);
       this.closeChannel(product.serial);
       await this.updateStatus();
     }

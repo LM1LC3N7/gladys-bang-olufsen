@@ -212,8 +212,11 @@ test('mute state unknown: nothing sent', async (t) => {
 });
 
 test('play, pause, next, previous and standby', async (t) => {
-  const { product, gladys } = await setup(t);
+  const clock = { now: 1_000_000 };
+  const { product, gladys } = await setup(t, { clock });
   const device = await createProduct(gladys);
+  const reads = () => product.state.requests.filter((r) => r.path === '/api/v1/state').length;
+  const before = reads();
   for (const key of ['pause', 'play', 'next', 'previous', 'standby']) {
     assert.equal((await set(gladys, device, key, 1)).success, true, key);
   }
@@ -229,7 +232,37 @@ test('play, pause, next, previous and standby', async (t) => {
   );
   assert.ok(product.writes().every((r) => r.headers['content-length'] === '0'));
   await settle();
+  // Minor 7: the reads after the commands go through isDue: not before the interval.
+  assert.equal(reads(), before, 'no read faster than the interval');
+  assert.equal(gladys.fake.lastState(id('power')), 1);
+});
+
+test('minor 7: a read after a command waits for the interval, then happens once', async (t) => {
+  const clock = { now: 1_000_000 };
+  const { product, gladys, app } = await setup(t, { clock });
+  const device = await createProduct(gladys);
+  const reads = () => product.state.requests.filter((r) => r.path === '/api/v1/state').length;
+  const before = reads();
+  assert.equal((await set(gladys, device, 'standby', 1)).success, true);
+  assert.equal((await set(gladys, device, 'play', 1)).success, true);
+  assert.ok(app.plannedReads.size <= 1, 'one planned read per product at most');
+  assert.equal(reads(), before, 'not before the interval');
+  clock.now += 30_000;
+  app.recheck(app.products[0]);
+  await settle();
+  assert.equal(reads(), before + 1, 'once');
   assert.equal(gladys.fake.lastState(id('power')), 0, 'read again after the standby');
+});
+
+test('minor 7: device updates in a row do not read faster than the interval', async (t) => {
+  const { product, gladys } = await setup(t);
+  const device = await createProduct(gladys);
+  const before = product.state.requests.filter((r) => r.method === 'GET').length;
+  for (let i = 0; i < 5; i += 1) {
+    await gladys.fake.deviceUpdated(device);
+  }
+  const after = product.state.requests.filter((r) => r.method === 'GET').length;
+  assert.equal(after, before);
 });
 
 test('source: validated against the dropdown, then against the live list', async (t) => {
@@ -282,11 +315,13 @@ test('a product off or unreachable is marked so, then asked again at spaced inte
   const record = app.attempts.get(SERIAL);
   assert.ok(record.nextAt - record.last <= TIMINGS.maxBackoff, 'the backoff is capped');
 
-  // A command to a product that does not answer says so; standby needs nothing.
+  // A command to a product that does not answer says so, standby included.
   const volume = await set(gladys, device, 'volume', 10);
   assert.equal(volume.success, false);
   assert.match(JSON.stringify(volume), /nothing sent/);
-  assert.equal((await set(gladys, device, 'standby', 1)).success, true);
+  const standby = await set(gladys, device, 'standby', 1);
+  assert.equal(standby.success, false, 'minor 8');
+  assert.match(JSON.stringify(standby), /does not answer.*nothing sent/);
 });
 
 test('standby and network standby show power 0 while the product answers', async (t) => {
@@ -675,4 +710,162 @@ test('one search at a time', async (t) => {
   };
   await Promise.all([app.scan(), app.scan(), app.scan()]);
   assert.equal(calls, 1);
+});
+
+// --- Review fixes ---------------------------------------------------------------
+
+test('I2: unmuting above the cap lowers the volume first', async (t) => {
+  const { product, gladys } = await setup(t, { productOptions: { volume: 90, muted: true } });
+  const device = await createProduct(gladys);
+  const ack = await set(gladys, device, 'mute', 1);
+  assert.equal(ack.success, true);
+  assert.equal(product.state.muted, false);
+  assert.equal(product.state.volume, 70, 'the default cap');
+  assert.deepEqual(
+    product.writes().map((r) => r.path),
+    ['/api/v1/sound/volume/level', '/api/v1/sound/volume/mute'],
+    'the volume before the unmute',
+  );
+  assert.equal(gladys.fake.lastState(id('volume')), 70);
+  // Muting never touches the volume.
+  product.state.volume = 95;
+  assert.equal((await set(gladys, device, 'mute', 1)).success, true);
+  assert.equal(product.state.volume, 95);
+});
+
+test('I2: the cap is read when unmuting; volume refused: not unmuted, nothing else sent', async (t) => {
+  let refuseLevel = false;
+  const request = async (options) =>
+    refuseLevel && options.path.endsWith('/volume/level')
+      ? { status: 400, body: '' }
+      : httpRequest(options);
+  const { product, gladys } = await setup(t, {
+    request,
+    productOptions: { volume: 50, muted: true },
+  });
+  const device = await createProduct(gladys);
+  await gladys.fake.configUpdated({ addresses: `127.0.0.1:${product.port}`, max_volume: 40 });
+  refuseLevel = true;
+  const ack = await set(gladys, device, 'mute', 1);
+  assert.equal(ack.success, false);
+  assert.match(JSON.stringify(ack), /not lowered to the cap 40.*unmute not sent/);
+  assert.equal(product.state.muted, true, 'still muted');
+  assert.equal(product.writes().filter((r) => r.path.endsWith('/mute')).length, 0);
+});
+
+test('I2: unmuting with a volume unknown and a cap: nothing sent', async (t) => {
+  const { product, gladys } = await setup(t, { productOptions: { volume: 'loud', muted: true } });
+  const device = await createProduct(gladys);
+  const ack = await set(gladys, device, 'mute', 1);
+  assert.equal(ack.success, false);
+  assert.match(JSON.stringify(ack), /volume unknown, not unmuted, nothing sent/);
+  assert.equal(product.writes().length, 0);
+});
+
+test('minor 4: the body of a command answer is ignored', async (t) => {
+  const request = async (options) => {
+    const answer = await httpRequest(options);
+    return options.method !== 'GET' ? { ...answer, body: 'Created <html>' } : answer;
+  };
+  const { product, gladys } = await setup(t, { request });
+  const device = await createProduct(gladys);
+  assert.equal((await set(gladys, device, 'volume', 40)).success, true);
+  assert.equal(product.state.volume, 40);
+});
+
+test('minor 5: play and a source change lower a known volume above the cap first', async (t) => {
+  const { product, gladys, app } = await setup(t, { productOptions: { volume: 90 } });
+  const device = await createProduct(gladys);
+  assert.equal(app.readings.get(SERIAL).volume, 90);
+  assert.equal((await set(gladys, device, 'play', 1)).success, true);
+  assert.deepEqual(
+    product.writes().map((r) => r.path),
+    ['/api/v1/sound/volume/level', '/api/v1/playback/command/play'],
+  );
+  assert.equal(product.state.volume, 70);
+  // Known level now 70: nothing more for the source change.
+  assert.equal((await set(gladys, device, 'source', 'lineIn')).success, true);
+  assert.equal(product.writes().length, 3);
+  // Raised to 95 from the B&O app (notified): lowered before the next source change.
+  app.readings.get(SERIAL).volume = 95;
+  product.state.volume = 95;
+  assert.equal((await set(gladys, device, 'source', 'spotify')).success, true);
+  assert.deepEqual(
+    product
+      .writes()
+      .slice(-2)
+      .map((r) => r.path),
+    ['/api/v1/sound/volume/level', '/api/v1/playback/sources/active/spotify'],
+  );
+  assert.equal(product.state.volume, 70);
+});
+
+test('minor 6: pause goes before the volumes waiting, which are merged', async (t) => {
+  let slow = false;
+  const request = async (options) => {
+    if (slow && options.path.endsWith('/volume/level')) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    return httpRequest(options);
+  };
+  const { product, gladys } = await setup(t, { request });
+  const device = await createProduct(gladys);
+  slow = true;
+  const acks = await Promise.all([
+    set(gladys, device, 'volume', 40),
+    settle(20).then(() => set(gladys, device, 'volume', 45)),
+    settle(25).then(() => set(gladys, device, 'volume', 50)),
+    settle(30).then(() => set(gladys, device, 'pause', 1)),
+  ]);
+  assert.deepEqual(
+    acks.map((a) => a.success),
+    [true, true, true, true],
+  );
+  assert.deepEqual(
+    product.writes().map((r) => `${r.path.split('/').pop()} ${r.body}`.trim()),
+    ['level {"level":40}', 'pause', 'level {"level":50}'],
+    'pause before the waiting volumes; 45 and 50 merged into 50',
+  );
+  assert.equal(product.state.volume, 50);
+});
+
+test('minor 9: the spacing of the reads is cleared when the address changes', async (t) => {
+  const { product, gladys, app } = await setup(t);
+  await createProduct(gladys);
+  app.attempts.set(SERIAL, { count: 5, last: Date.now(), nextAt: Date.now() + 300_000 });
+  app.remember({ serial: SERIAL, name: 'Living room' }, { host: '127.0.0.1', port: product.port });
+  assert.ok(app.attempts.has(SERIAL), 'same address: kept');
+  app.remember({ serial: SERIAL, name: 'Living room' }, { host: '127.0.0.2', port: product.port });
+  assert.equal(app.attempts.has(SERIAL), false, 'new address: cleared');
+});
+
+test('minor 10: starts never run twice at once; those asked meanwhile are merged', async (t) => {
+  const { product, app } = await setup(t);
+  let running = 0;
+  let most = 0;
+  let runs = 0;
+  const original = app.runStart.bind(app);
+  app.runStart = async (...args) => {
+    runs += 1;
+    running += 1;
+    most = Math.max(most, running);
+    try {
+      await settle(30);
+      return await original(...args);
+    } finally {
+      running -= 1;
+    }
+  };
+  const config = { addresses: `127.0.0.1:${product.port}` };
+  const first = app.start(config, { connected: true });
+  await settle(10);
+  await Promise.all([
+    first,
+    app.start(config),
+    app.start({ ...config, max_volume: 33 }),
+    app.start(config),
+  ]);
+  assert.equal(most, 1, 'never two at once');
+  assert.equal(runs, 2, 'the one running, then one for all the others');
+  assert.equal(app.config.maxVolume, 70, 'the last configuration wins');
 });

@@ -87,6 +87,17 @@ plafond abaissé s'applique aussitôt. Il ne limite que ce que Gladys envoie :
 l'application B&O, la télécommande et les boutons du produit ne sont pas
 limités. Mettez 100 pour l'enlever.
 
+Les commandes qui ramènent le son respectent aussi le plafond :
+
+- **Enlever la sourdine** : le volume est lu sur le produit juste avant ;
+  au-dessus du plafond (relu à ce moment), Gladys le ramène d'abord au
+  plafond, puis enlève la sourdine. Si le volume ne peut pas être baissé à
+  temps (ou est inconnu), la sourdine reste et Gladys le dit (« nothing
+  sent », rien n'a été envoyé).
+- **Lecture** et **changement de source** : quand le dernier volume connu
+  (dernière lecture ou notification) dépasse le plafond, il est d'abord
+  ramené au plafond. Ce dernier volume connu peut dater de quelques secondes.
+
 ## Veille, et mise en marche
 
 L'API n'a **pas de « marche »** : l'alimentation est un état en lecture seule
@@ -117,11 +128,17 @@ la box l'évite.
 
 Chaque commande reçoit sa réponse dans les 5 secondes qu'attend Gladys. Les
 commandes vers un même produit partent une par une ; une commande qui ne peut
-pas partir à temps est abandonnée, jamais envoyée en retard. Un volume qui
+pas partir à temps est abandonnée, jamais envoyée en retard. Pause, sourdine
+et veille passent avant les changements de volume encore en attente, et les
+changements de volume en attente sont fusionnés (un curseur déplacé n'envoie
+que sa dernière position). La veille sur un produit qui ne répond pas reçoit
+« does not answer: nothing sent » (rien n'a été envoyé). Après une commande,
+l'état est relu, mais jamais plus vite que l'intervalle de rafraîchissement
+(les notifications montrent de toute façon le changement aussitôt). Un volume qui
 n'est pas un nombre entier de 0 à 100 (vide, 12,5, texte…) est refusé avant
 tout envoi. Quand une commande a pu atteindre le produit sans être confirmée
-à temps, Gladys affiche « envoyée, sans confirmation » et l'état est relu deux
-secondes plus tard ; « rien n'a été envoyé » n'est dit que si aucune requête
+à temps, Gladys affiche « envoyée, sans confirmation » et l'état est relu dès
+que l'intervalle de rafraîchissement le permet ; « rien n'a été envoyé » n'est dit que si aucune requête
 de commande n'est partie.
 
 ## Réglages

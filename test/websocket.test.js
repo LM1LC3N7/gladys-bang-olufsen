@@ -7,8 +7,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:net';
-import { acceptKey, encodeFrame, openWebSocket } from '../src/mozart/websocket.js';
+import { connect, createServer } from 'node:net';
+import {
+  MAX_FRAGMENTS,
+  MAX_PENDING_WRITE,
+  acceptKey,
+  encodeFrame,
+  isValidCloseCode,
+  openWebSocket,
+} from '../src/mozart/websocket.js';
 import { clientFrames, serverFrame } from './fixtures/fakeProduct.js';
 
 /** A TCP server: `onClient(socket, key, request)` once the upgrade request is read. */
@@ -127,7 +134,7 @@ test('messages: whole, fragmented, sent with the handshake, one byte at a time',
     socket.write(
       Buffer.concat([
         Buffer.from(
-          `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+          `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
         ),
         serverFrame(1, 'first'),
       ]),
@@ -229,4 +236,171 @@ test('close() before and after the opening', async (t) => {
   late.ws.close();
   assert.equal(await late.closed, 'closed');
   late.ws.close();
+});
+
+// --- Review fixes ---------------------------------------------------------------
+
+/** A peer that accepts, then collects every client frame (across chunks). */
+async function collectingPeer(t, extra = '') {
+  const state = { peer: undefined, frames: [], buffer: Buffer.alloc(0) };
+  const port = await rawServer(t, (socket, key) => {
+    state.peer = socket;
+    socket.on('data', (chunk) => {
+      state.buffer = Buffer.concat([state.buffer, chunk]);
+      const frames = clientFrames(state.buffer);
+      if (frames.length > 0) {
+        state.frames.push(...frames);
+        const used = frames.reduce((n, f) => n + 6 + f.payload.length, 0);
+        state.buffer = state.buffer.subarray(used);
+      }
+    });
+    accept(socket, key, extra);
+  });
+  return { port, state };
+}
+
+test('B1: empty fragments are counted: past MAX_FRAGMENTS the message is refused', async (t) => {
+  const { port, state } = await collectingPeer(t);
+  const { events, closed } = client(port);
+  await wait(50);
+  const empty = Buffer.from([0x00, 0x00]);
+  state.peer.write(
+    Buffer.concat([
+      Buffer.from([0x01, 0x00]),
+      ...Array.from({ length: MAX_FRAGMENTS + 10 }, () => empty),
+    ]),
+  );
+  assert.equal(await closed, 'message too large');
+  assert.deepEqual(events.messages, []);
+  await wait(30);
+  const close = state.frames.find((f) => f.opcode === 8);
+  assert.equal(close?.payload.readUInt16BE(0), 1009);
+});
+
+test('B1: a message of MAX_FRAGMENTS frames is still accepted', async (t) => {
+  const { port, state } = await collectingPeer(t);
+  const { events, ws } = client(port);
+  t.after(() => ws.close());
+  await wait(50);
+  const parts = [serverFrame(1, 'a', { fin: false })];
+  for (let i = 0; i < MAX_FRAGMENTS - 2; i += 1) {
+    parts.push(serverFrame(0, '', { fin: false }));
+  }
+  parts.push(serverFrame(0, 'b'));
+  state.peer.write(Buffer.concat(parts));
+  await wait(50);
+  assert.deepEqual(events.messages, ['ab']);
+});
+
+test('I1: a batch of pings gets one pong, the last one', async (t) => {
+  const { port, state } = await collectingPeer(t);
+  const { ws } = client(port);
+  t.after(() => ws.close());
+  await wait(50);
+  state.peer.write(Buffer.concat(Array.from({ length: 200 }, (_, i) => serverFrame(9, `p${i}`))));
+  await wait(80);
+  const pongs = state.frames.filter((f) => f.opcode === 10);
+  assert.ok(pongs.length >= 1 && pongs.length < 10, `${pongs.length} pongs`);
+  assert.equal(pongs.at(-1).payload.toString(), 'p199');
+});
+
+test('I1: a peer that does not read what is sent back is dropped', async (t) => {
+  const { port, state } = await collectingPeer(t);
+  let socket;
+  const { closed } = client(port, {
+    connectSocket: (options) => {
+      socket = connect(options);
+      return socket;
+    },
+  });
+  await wait(50);
+  // What a peer that stopped reading leaves in the send buffer.
+  Object.defineProperty(socket, 'writableLength', { get: () => MAX_PENDING_WRITE + 1 });
+  state.peer.write(serverFrame(9, 'x'));
+  assert.equal(await closed, 'peer not reading');
+});
+
+test('minor 1: no "Connection: Upgrade", or a subprotocol not asked for: refused', async (t) => {
+  for (const answer of [
+    (socket, key) =>
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+      ),
+    (socket, key) => accept(socket, key, 'Sec-WebSocket-Protocol: chat\r\n'),
+  ]) {
+    const port = await rawServer(t, answer);
+    const { events, closed } = client(port);
+    assert.equal(await closed, 'handshake refused');
+    assert.equal(events.open, 0);
+  }
+  // A list of tokens is fine.
+  const port = await rawServer(t, (socket, key) =>
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+    ),
+  );
+  const ok = client(port);
+  await wait(50);
+  assert.equal(ok.events.open, 1);
+  ok.ws.close();
+});
+
+test('minor 1: invalid UTF-8 in a text message closes with 1007', async (t) => {
+  const { port, state } = await collectingPeer(t);
+  const { events, closed } = client(port);
+  await wait(50);
+  state.peer.write(serverFrame(1, Buffer.from([0x61, 0xff, 0xfe])));
+  assert.equal(await closed, 'invalid UTF-8');
+  assert.deepEqual(events.messages, []);
+  await wait(30);
+  assert.equal(state.frames.find((f) => f.opcode === 8)?.payload.readUInt16BE(0), 1007);
+});
+
+for (const [name, payload, answer] of [
+  ['a 1-byte close', Buffer.from([0x03]), 1002],
+  ['a reserved code (1005)', Buffer.from([0x03, 0xed]), 1002],
+  ['a reserved code (1015)', Buffer.from([0x03, 0xf7]), 1002],
+  ['a valid code (1001)', Buffer.from([0x03, 0xe9]), 1000],
+  ['an empty close', Buffer.alloc(0), 1000],
+]) {
+  test(`minor 2: ${name} is answered ${answer}, flushed before the end`, async (t) => {
+    const { port, state } = await collectingPeer(t);
+    const { closed } = client(port);
+    await wait(50);
+    state.peer.write(serverFrame(8, payload));
+    assert.equal(await closed, 'closed by the product');
+    await wait(50);
+    const close = state.frames.find((f) => f.opcode === 8);
+    assert.equal(close?.payload.length, 2);
+    assert.equal(close.payload.readUInt16BE(0), answer);
+  });
+}
+
+test('minor 2: the close codes that may be sent', () => {
+  for (const code of [1000, 1001, 1002, 1003, 1007, 1011, 3000, 4999]) {
+    assert.equal(isValidCloseCode(code), true, String(code));
+  }
+  for (const code of [0, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000]) {
+    assert.equal(isValidCloseCode(code), false, String(code));
+  }
+});
+
+test('minor 3: a handshake sent one byte at a time, its end split across chunks', async (t) => {
+  let peer;
+  const port = await rawServer(t, async (socket, key) => {
+    peer = socket;
+    const answer = Buffer.from(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
+    );
+    for (const byte of Buffer.concat([answer, serverFrame(1, 'hi')])) {
+      socket.write(Buffer.from([byte]));
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+  const { events, ws } = client(port);
+  t.after(() => ws.close());
+  await wait(200);
+  assert.ok(peer);
+  assert.equal(events.open, 1);
+  assert.deepEqual(events.messages, ['hi']);
 });

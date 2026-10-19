@@ -83,6 +83,16 @@ just before each volume command, so a lowered cap applies at once. It only
 limits what Gladys sends: the B&O app, the remote and the buttons of the
 product are not limited. Set it to 100 to remove it.
 
+The commands that bring the sound back respect the cap too:
+
+- **Unmute**: the volume is read from the product just before; above the cap
+  (read at that moment), Gladys first lowers it to the cap, then unmutes. If
+  the volume cannot be lowered in time (or is unknown), the product is not
+  unmuted and Gladys says so ("nothing sent").
+- **Play** and a **source change**: when the last known volume (from the
+  last reading or notification) is above the cap, it is lowered to the cap
+  first. The last known volume may be a few seconds old.
+
 ## Standby, and turning on
 
 The API has **no "power on"**: power is a read-only state and standby a
@@ -110,10 +120,15 @@ is found again. A fixed address in the router avoids it.
 
 Every command is answered to Gladys within 5 seconds. Commands to one product
 are sent one at a time; a command that cannot start in time is dropped, never
-sent late. A volume that is not a whole number from 0 to 100 (empty, 12.5,
+sent late. Pause, mute and standby go before the volume changes still
+waiting, and volume changes still waiting are merged (moving a slider sends
+the last position only). Standby on a product that does not answer is
+answered "does not answer: nothing sent". After a command the state is read
+again, but never faster than the refresh interval (the notifications show
+the change at once anyway). A volume that is not a whole number from 0 to 100 (empty, 12.5,
 text…) is refused before anything is sent. When a command may have reached
 the product but was not confirmed in time, Gladys shows "sent, without
-confirmation" and the state is read again two seconds later; "nothing sent"
+confirmation" and the state is read again as soon as the refresh interval allows; "nothing sent"
 is only said when no command request left.
 
 ## Settings
