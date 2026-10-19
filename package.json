@@ -1,6 +1,6 @@
 {
   "name": "gladys-bang-olufsen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for the Bang & Olufsen products of the Mozart platform (volume, mute, source, playback, title, standby), over their official local API. Unofficial, not affiliated with Bang & Olufsen.",
   "type": "module",

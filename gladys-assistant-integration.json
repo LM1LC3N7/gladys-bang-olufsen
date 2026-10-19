@@ -6,8 +6,8 @@
     "en": "Bang & Olufsen Mozart speakers and TVs on the local network: volume, mute, source, playback.",
     "fr": "Enceintes et TV Bang & Olufsen Mozart en local : volume, sourdine, source, lecture, titre."
   },
-  "version": "0.1.0",
-  "docker_image": "ghcr.io/lm1lc3n7/gladys-bang-olufsen:0.1.0",
+  "version": "0.1.1",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-bang-olufsen:0.1.1",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-bang-olufsen/main/cover.png",
   "categories": ["multimedia"],
