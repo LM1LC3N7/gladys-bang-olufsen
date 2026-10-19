@@ -1,61 +1,149 @@
-# Demo Devices Template
+# Bang & Olufsen
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+Control the recent **Bang & Olufsen** products of the **Mozart** platform
+from Gladys, on your local network, without any cloud: volume (capped),
+mute, source, play, pause, next, previous, the title playing, and standby.
+The integration uses the official local API Bang & Olufsen publishes for
+these products (REST, and live notifications over a WebSocket), the one the
+Home Assistant Bang & Olufsen integration uses.
+
+> **Unofficial integration, not affiliated with Bang & Olufsen.** This first
+> milestone was written and tested against a simulated product only: it has
+> **never been tested with a real product**. Your feedback is welcome.
+
+## Supported products
+
+Only the products of the **Mozart** platform, the ones Bang & Olufsen lists
+for its API: Beosound Balance, Beosound Emerge, Beosound Level, Beosound A5,
+Beosound A9 (5th generation), Beosound 2 (3rd generation), Beosound Theatre,
+Beosound Premiere, Beolab 8, Beolab 28 and Beoconnect Core. A **Beovision**
+TV is reached through its Mozart part (a Beosound Theatre, for example): the
+sound (volume, source, playback), not the picture.
+
+**Older BeoLink products are not supported**: Beoplay speakers (A9 up to the
+4th generation, M3, M5…), BeoSound Core, BeoSound Essence, BeoSound 35,
+Beovision TVs without a Mozart product, and every product of the "ASE" or
+older platforms. They do not answer the Mozart API: the integration status
+says so for an address where such a product answers, and nothing is added.
+
+## Prepare the products
+
+1. Set the products up with the Bang & Olufsen app as usual (Wi-Fi or
+   Ethernet).
+2. Give each product a **fixed IP address** in your router (reserved DHCP
+   lease). The address is shown in the B&O app, or in your router's list of
+   devices.
+3. Gladys must reach the products on the network: port 80 (REST API) and
+   port 9339 (notifications).
+
+## Add a product
+
+- **By its address** (recommended): type the IP address in "IP addresses of
+  the products" (several addresses separated by commas) and save.
+- **By the search** (optional): use **Find the products**. Gladys browses the
+  network (mDNS, service `_bangolufsen._tcp`) for the integration. A network
+  that blocks multicast may hide them: type the address then. The search is
+  never needed for the rest to work.
+
+The product appears in the integration's **Discovery** tab: create it.
 
 ## What you get
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+One Gladys device per product:
 
-## Configuration
+| Feature     | Detail                                                                   |
+| ----------- | ------------------------------------------------------------------------ |
+| Power       | Read only: 1 on, 0 standby (or network standby), off or unreachable      |
+| Standby     | Button: puts the product in standby                                      |
+| Volume      | 0 to 100, read and set (whole numbers only), capped by the volume cap    |
+| Mute        | Button: each press reads the mute from the product and sets the opposite |
+| Play, Pause | Buttons                                                                  |
+| Next, Prev. | Buttons                                                                  |
+| Playback    | Read only: 1 playing, 0 paused, stopped or idle                          |
+| Source      | Dropdown, read and set: the sources this product has shown (Spotify, …)  |
+| Now playing | Text: "Artist - Title", or "—" when nothing plays                        |
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+The states arrive **at once** through the notifications of the product
+(volume turned on the product, track changed in the B&O app…), merged to one
+update per second at most; the whole state is also read again at the refresh
+interval. When the notifications are lost, they are opened again after 5
+seconds, then twice as long each time (5 minutes at most).
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+The "Source" dropdown lists the sources the product announces as enabled and
+playable (Spotify, TIDAL, Deezer, radio, AirPlay, Chromecast, line-in, TV…).
+A source seen once stays in the list; selecting one that is not available at
+that moment is refused and nothing is sent.
 
-## Actions
+## Volume cap
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+**Volume cap** (1 to 100, **70** by default) is the highest volume Gladys may
+set. A higher volume asked by a scene, the dashboard or a voice assistant is
+lowered to the cap (the log says so), never refused. The cap is read again
+just before each volume command, so a lowered cap applies at once. It only
+limits what Gladys sends: the B&O app, the remote and the buttons of the
+product are not limited. Set it to 100 to remove it.
 
-## Scenes
+## Standby, and turning on
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+The API has **no "power on"**: power is a read-only state and standby a
+button, not a switch, so a "turn everything off" never puts the products in
+standby, and a "turn everything on" has nothing to send. A product wakes up
+by itself when something plays to it (AirPlay, Chromecast, Spotify…), or from
+the B&O app, its remote or its buttons.
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+A product in standby usually still answers (network standby): it shows **0**
+with its last volume. A product that does not answer at all is shown **0**
+too (off or unreachable), the integration status names it, and it is asked
+again less and less often: after the refresh interval, then twice as long
+each time, 5 minutes at most. A product that accepts the connection and then
+says nothing is **unknown**: nothing is published.
 
-## Dashboard
+## A product that changed address
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+Each product is known by its serial number (from its Beolink id), not by its
+address. When another product answers at the address of a created one, the
+integration never sends anything there: the product shows **0**, the status
+says "address unknown", and a search runs by itself every 10 minutes until it
+is found again. A fixed address in the router avoids it.
 
-## Troubleshooting
+## Commands
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+Every command is answered to Gladys within 5 seconds. Commands to one product
+are sent one at a time; a command that cannot start in time is dropped, never
+sent late. A volume that is not a whole number from 0 to 100 (empty, 12.5,
+text…) is refused before anything is sent. When a command may have reached
+the product but was not confirmed in time, Gladys shows "sent, without
+confirmation" and the state is read again two seconds later; "nothing sent"
+is only said when no command request left.
+
+## Settings
+
+- **Volume cap**: see above.
+- **Refresh interval**: how often the whole state is read again, 10 to 300
+  seconds (30 by default).
+- **Check the products**: asks every known product now and says which ones
+  answer, whether they are on, and their volume.
+
+## Privacy and security
+
+The integration only talks to the products, on your local network, in plain
+HTTP and WebSocket (the API offers nothing else). The API has no password,
+and the integration asks for none. It keeps a list of the known products
+(serial number, address, name, sources) in its data folder (`/data`).
+Answers are read with a size limit (64 KB), notifications too (64 KB each, 50
+per second at most), and only the expected fields are kept.
+
+## Limits
+
+- Local network only, Mozart products only (see above).
+- No "power on", no multiroom (Beolink) grouping, no sound settings, no
+  notification playback in this first version.
+- Never tested with a real product so far.
+
+## Credits
+
+The endpoints and models are ported to JavaScript from
+[mozart-api](https://github.com/bang-olufsen/mozart-open-api) (MIT license),
+published by Bang & Olufsen. Bang & Olufsen, Beosound, Beolab, Beovision,
+Beoconnect and BeoLink are trademarks of Bang & Olufsen, used only to name
+the compatible products.

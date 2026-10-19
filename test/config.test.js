@@ -1,33 +1,45 @@
+// -----------------------------------------------------------------------------
+// The configuration typed by the user, normalized.
+// -----------------------------------------------------------------------------
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeConfig, DEFAULT_CONFIG } from '../src/config.js';
+import { normalizeConfig, parseAddress } from '../src/config.js';
+import { MAX_VOLUME, POLL_INTERVAL } from '../src/constants.js';
 
-test('normalizeConfig returns the defaults when called with no argument', () => {
-  assert.deepEqual(normalizeConfig(), DEFAULT_CONFIG);
+test('addresses: IPv4 or host name, optional port, pasted URLs reduced', () => {
+  assert.deepEqual(parseAddress('192.168.1.30'), { host: '192.168.1.30', port: 80 });
+  assert.deepEqual(parseAddress(' http://192.168.1.30:8080/api/v1 '), {
+    host: '192.168.1.30',
+    port: 8080,
+  });
+  assert.deepEqual(parseAddress('Beosound-Level.local'), {
+    host: 'beosound-level.local',
+    port: 80,
+  });
+  for (const bad of ['', '999.1.1.1', '1.2.3', 'a_b', 'host:0', 'host:70000', '-x.local', null]) {
+    assert.equal(parseAddress(bad), undefined, String(bad));
+  }
 });
 
-test('normalizeConfig keeps user values over the defaults', () => {
-  const config = normalizeConfig({ latitude: 45.5, longitude: -73.6, unit: 'fahrenheit' });
-  assert.equal(config.latitude, 45.5);
-  assert.equal(config.longitude, -73.6);
-  assert.equal(config.unit, 'fahrenheit');
+test('the list of addresses: separators, duplicates, invalid entries reported', () => {
+  const config = normalizeConfig({ addresses: '192.168.1.30, 192.168.1.30;192.168.1.31 bad_one' });
+  assert.deepEqual(
+    config.addresses.map((a) => a.host),
+    ['192.168.1.30', '192.168.1.31'],
+  );
+  assert.deepEqual(config.invalid, ['bad_one']);
 });
 
-test('normalizeConfig coerces numeric strings coming from a form', () => {
-  const config = normalizeConfig({ latitude: '48.8', longitude: '2.3', poll_frequency: '600' });
-  assert.equal(config.latitude, 48.8);
-  assert.equal(config.longitude, 2.3);
-  assert.equal(config.poll_frequency, 600);
-  assert.equal(typeof config.poll_frequency, 'number');
-});
-
-test('normalizeConfig falls back to the default for a missing numeric field', () => {
-  const config = normalizeConfig({ unit: 'celsius' });
-  assert.equal(config.poll_frequency, DEFAULT_CONFIG.poll_frequency);
-});
-
-test('GLADYS_PREFER_LOCAL defaults to true and only an explicit false disables it', () => {
-  assert.equal(normalizeConfig().GLADYS_PREFER_LOCAL, true);
-  assert.equal(normalizeConfig({ GLADYS_PREFER_LOCAL: true }).GLADYS_PREFER_LOCAL, true);
-  assert.equal(normalizeConfig({ GLADYS_PREFER_LOCAL: false }).GLADYS_PREFER_LOCAL, false);
+test('the refresh interval and the volume cap are bounded', () => {
+  assert.equal(normalizeConfig().pollInterval, POLL_INTERVAL.default);
+  assert.equal(normalizeConfig({ poll_interval: 1 }).pollInterval, POLL_INTERVAL.min);
+  assert.equal(normalizeConfig({ poll_interval: '9999' }).pollInterval, POLL_INTERVAL.max);
+  assert.equal(normalizeConfig().maxVolume, MAX_VOLUME.default);
+  assert.equal(normalizeConfig({ max_volume: 0 }).maxVolume, MAX_VOLUME.min);
+  assert.equal(normalizeConfig({ max_volume: 150 }).maxVolume, 100);
+  assert.equal(normalizeConfig({ max_volume: '45' }).maxVolume, 45);
+  for (const bad of ['', 'loud', NaN, {}]) {
+    assert.equal(normalizeConfig({ max_volume: bad }).maxVolume, MAX_VOLUME.default, String(bad));
+  }
 });
