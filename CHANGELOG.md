@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-04
+
 ### Changed
 
 - Integration SDK 0.16 (no change for the devices).
@@ -65,6 +67,7 @@ the notes of the version's GitHub Release.
   a 1-byte or reserved close code is answered 1002, never echoed, and the
   close frame is flushed before the end.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-bang-olufsen/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/LM1LC3N7/gladys-bang-olufsen/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/LM1LC3N7/gladys-bang-olufsen/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/LM1LC3N7/gladys-bang-olufsen/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/LM1LC3N7/gladys-bang-olufsen/releases/tag/v0.1.1
