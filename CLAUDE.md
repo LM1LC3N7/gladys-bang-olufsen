@@ -9,7 +9,8 @@ A Gladys Assistant **external integration** for the Bang & Olufsen products
 of the Mozart platform, over their official local API (REST + WebSocket
 notifications): a Node.js service (Node 22+, ESM, no build step) that runs in
 its own sandboxed Docker container and talks to Gladys through
-[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
+[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js)
+(v0.16),
 its only runtime dependency. It started from the official JavaScript template;
 the endpoints and models it uses are ported from `mozart-api` (MIT, published
 by Bang & Olufsen, see `THIRD_PARTY_NOTICES.md`). Older BeoLink products are
@@ -19,7 +20,7 @@ out of scope. Decisions are recorded in `TODO.md`.
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
+npm test                                  # node --test --test-timeout=60000
 node --test test/app.test.js              # one file
 node --test --test-name-pattern "volume"  # tests whose name matches
 npm run cover                             # regenerates cover.png
@@ -55,6 +56,11 @@ test/                             node --test, fake Gladys + fake product (test/
 
 ## Rules
 
+- **Features follow the core model.** Every feature has a numeric `min` and
+  `max` (0/0 for text), `read_only` and `has_feedback`: Gladys answers HTTP 422
+  otherwise, and the SDK's fake Gladys does not check it
+  (`test/helpers/coreFeature.js` does). Devices carry `should_poll: false`
+  (Gladys 5.3 polls a device with `poll_frequency` unless it says so).
 - **External ids are forever.** Build them with
   `gladys.externalIds(type, platformId)`, `platformId` being the unique id the
   platform gives the device (here the serial number of the Beolink id), never

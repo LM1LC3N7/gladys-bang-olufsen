@@ -6,8 +6,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import { DEFAULT_CONFIG } from '../src/config.js';
 import { ACTIONS, MAX_VOLUME, MDNS_SERVICE, POLL_INTERVAL } from '../src/constants.js';
+import { FEATURE_SPECS, buildDevice } from '../src/model.js';
+import { assertCoreDevice } from './helpers/coreFeature.js';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const manifest = JSON.parse(read('gladys-assistant-integration.json'));
@@ -124,4 +127,20 @@ test('the actions are the ones the code handles', () => {
   assert.equal(manifest.scene_actions, undefined);
   assert.equal(manifest.scene_triggers, undefined);
   assert.equal(manifest.widgets, undefined);
+});
+
+test('every feature has a numeric min and max and the other core fields', () => {
+  const gladys = createFakeGladys({ selector: 'bang-olufsen' });
+  const sources = [
+    { id: 'spotify', name: 'Spotify' },
+    { id: 'tv', name: 'TV' },
+  ];
+  let features = 0;
+  for (const product of [
+    { serial: '12345678', name: 'Beosound', host: '192.168.1.20', sources },
+    { serial: '12345679', host: '' },
+  ]) {
+    features += assertCoreDevice(buildDevice(gladys, product), product.serial);
+  }
+  assert.equal(features, 2 * Object.keys(FEATURE_SPECS).length);
 });

@@ -20,7 +20,9 @@ import { clientFrames, serverFrame } from './fixtures/fakeProduct.js';
 
 /** A TCP server: `onClient(socket, key, request)` once the upgrade request is read. */
 async function rawServer(t, onClient) {
+  const sockets = new Set();
   const server = createServer((socket) => {
+    sockets.add(socket);
     let text = '';
     const onData = (chunk) => {
       text += chunk.toString('latin1');
@@ -35,7 +37,12 @@ async function rawServer(t, onClient) {
     socket.on('error', () => {});
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  // A connection still open would hold server.close() until the client's
+  // 50 s idle timeout: under --test-timeout, Node 22 counts it in the file.
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise((resolve) => server.close(resolve));
+  });
   return server.address().port;
 }
 
